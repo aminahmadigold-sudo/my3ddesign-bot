@@ -76,6 +76,22 @@ CATEGORY_BUTTONS = [
     "🎨 طرح اختصاصی",
 ]
 
+
+def normalize_label(text: str) -> str:
+    """بعضی گوشی‌ها به ایموجی‌ها کاراکتر نامرئی (variation selector) اضافه می‌کنن
+    که باعث می‌شه متن دکمه با متن تعریف‌شده تو کد یکی نباشه. این تابع اون رو حذف می‌کنه."""
+    if not text:
+        return ""
+    return text.replace("\ufe0f", "").strip()
+
+
+class CategoryFilter(filters.MessageFilter):
+    def filter(self, message):
+        return normalize_label(message.text) in [normalize_label(b) for b in CATEGORY_BUTTONS]
+
+
+category_filter = CategoryFilter()
+
 # ---------------------- کیبوردها ----------------------
 
 CUSTOMER_MENU = ReplyKeyboardMarkup(
@@ -369,7 +385,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def new_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_membership(update, context):
         return ConversationHandler.END
-    order_type = update.message.text
+    order_type = normalize_label(update.message.text)
     context.user_data["order_type"] = order_type
     await update.message.reply_text(f"سفارش «{order_type}» ثبت می‌شه.\nلطفاً عکس مورد نظر رو بفرستید 📷")
     return ASK_PRINT
@@ -388,7 +404,7 @@ async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     order_type = context.user_data.get("order_type", "")
 
-    if order_type == "🖨 پرینت سه‌بعدی":
+    if normalize_label(order_type) == normalize_label("🖨 پرینت سه‌بعدی"):
         # این دسته خودش یعنی پرینت میخواد، سوال اضافه لازم نیست
         context.user_data["wants_print"] = True
         await update.message.reply_text("لطفاً جزئیات پرینت رو بنویسید (سایز، جنس، تعداد و ...):")
@@ -962,7 +978,7 @@ def main():
 
     # مکالمه ثبت سفارش مشتری
     order_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^(" + "|".join(CATEGORY_BUTTONS) + ")$"), new_order_start)],
+        entry_points=[MessageHandler(category_filter, new_order_start)],
         states={
             ASK_PRINT: [MessageHandler(filters.PHOTO, photo_received)],
             ASK_DETAILS: [
