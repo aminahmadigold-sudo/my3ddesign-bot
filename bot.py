@@ -35,6 +35,9 @@ from telegram.ext import (
 TOKEN = os.environ.get("BOT_TOKEN", "8783453906:AAFWugnyAmDqQiPSIiFL11g2JNDN9hW9ux4")
 ADMIN_IDS = [1356831142]
 CHANNEL_USERNAME = "@AvineGroup0"  # کانال اجباری برای عضویت
+BOT_USERNAME = "my3ddesign_bot"  # بدون @ - برای ساخت لینک دعوت
+CARD_NUMBER = "6219861902402162"
+CARD_HOLDER = "امین احمدی"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ORDERS_DIR = os.path.join(BASE_DIR, "orders")
@@ -49,27 +52,46 @@ logger = logging.getLogger(__name__)
 STATUS_LABELS = {
     "pending": "در انتظار بررسی",
     "priced": "قیمت ارسال شده",
+    "confirmed": "تایید شده توسط مشتری (در انتظار واریز)",
     "in_progress": "در حال طراحی",
     "done": "تکمیل شده",
     "rejected": "رد شده",
+    "cancelled_by_customer": "لغو شده توسط مشتری",
 }
 
 # مراحل مکالمه ثبت سفارش
 ASK_PRINT, ASK_DETAILS = range(2)
 # مرحله دریافت قیمت از ادمین
 ASK_PRICE = 10
+# مرحله ثبت شماره تماس پروفایل
+ASK_PHONE = 20
+# مرحله دریافت مبلغ شارژ کیف پول
+ASK_CHARGE_AMOUNT = 30
+
+# دسته‌بندی خدمات - متن دکمه به عنوان نوع سفارش ذخیره می‌شه
+CATEGORY_BUTTONS = [
+    "📷 تبدیل عکس به 3D",
+    "💎 طراحی طلا و جواهر",
+    "🖨 پرینت سه‌بعدی",
+    "🎨 طرح اختصاصی",
+]
 
 # ---------------------- کیبوردها ----------------------
 
 CUSTOMER_MENU = ReplyKeyboardMarkup(
-    [["🆕 ثبت سفارش جدید"], ["📋 سفارش‌های من"], ["ℹ️ راهنما"]],
+    [
+        ["📷 تبدیل عکس به 3D", "💎 طراحی طلا و جواهر"],
+        ["🖨 پرینت سه‌بعدی", "🎨 طرح اختصاصی"],
+        ["📋 پیگیری سفارشات", "💳 کیف پول"],
+        ["👤 پروفایل من", "ℹ️ راهنما"],
+    ],
     resize_keyboard=True,
 )
 
 ADMIN_MENU = ReplyKeyboardMarkup(
     [
         ["📥 سفارش‌های جدید", "✅ سفارش‌های تکمیل‌شده"],
-        ["📋 همه سفارش‌ها"],
+        ["📋 همه سفارش‌ها", "👥 کاربران"],
     ],
     resize_keyboard=True,
 )
@@ -93,6 +115,9 @@ def init_db():
             user_id INTEGER PRIMARY KEY,
             username TEXT,
             full_name TEXT,
+            phone TEXT,
+            wallet INTEGER DEFAULT 0,
+            referred_by INTEGER,
             joined_at TEXT
         )
     """)
@@ -102,6 +127,7 @@ def init_db():
             user_id INTEGER NOT NULL,
             username TEXT,
             full_name TEXT,
+            order_type TEXT,
             photo_path TEXT,
             wants_print INTEGER DEFAULT 0,
             print_details TEXT,
@@ -116,28 +142,82 @@ def init_db():
     conn.close()
 
 
-def upsert_user(user_id, username, full_name):
+def upsert_user(user_id, username, full_name, referred_by=None):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
     if not cur.fetchone():
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         cur.execute(
-            "INSERT INTO users (user_id, username, full_name, joined_at) VALUES (?, ?, ?, ?)",
-            (user_id, username, full_name, now),
+            "INSERT INTO users (user_id, username, full_name, wallet, referred_by, joined_at) VALUES (?, ?, ?, 0, ?, ?)",
+            (user_id, username, full_name, referred_by, now),
         )
         conn.commit()
     conn.close()
 
 
-def add_order(user_id, username, full_name, photo_path):
+def get_user(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def count_orders_for_user(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM orders WHERE user_id = ?", (user_id,))
+    count = cur.fetchone()[0]
+    conn.close()
+    return count
+
+
+def count_referrals(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM users WHERE referred_by = ?", (user_id,))
+    count = cur.fetchone()[0]
+    conn.close()
+    return count
+
+
+def adjust_wallet(user_id, amount):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET wallet = wallet + ? WHERE user_id = ?", (amount, user_id))
+    conn.commit()
+    conn.close()
+
+
+def list_users(limit=30):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users ORDER BY joined_at DESC LIMIT ?", (limit,))
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def set_phone(user_id, phone):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET phone = ? WHERE user_id = ?", (phone, user_id))
+    conn.commit()
+    conn.close()
+
+
+def add_order(user_id, username, full_name, photo_path, order_type=""):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cur.execute(
-        """INSERT INTO orders (user_id, username, full_name, photo_path, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'pending', ?, ?)""",
-        (user_id, username, full_name, photo_path, now, now),
+        """INSERT INTO orders (user_id, username, full_name, photo_path, order_type, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)""",
+        (user_id, username, full_name, photo_path, order_type, now, now),
     )
     conn.commit()
     order_id = cur.lastrowid
@@ -195,7 +275,8 @@ async def is_channel_member(context: ContextTypes.DEFAULT_TYPE, user_id: int) ->
         member = await context.bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
         return member.status not in ("left", "kicked")
     except Exception as e:
-        logger.warning(f"خطا در بررسی عضویت کانال: {e}")
+        # این ارور معمولاً یعنی ربات ادمین کانال نیست
+        logger.error(f"خطا در بررسی عضویت کانال برای کاربر {user_id}: {e}")
         return False
 
 
@@ -226,7 +307,14 @@ async def require_membership(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    upsert_user(user.id, user.username or "", user.full_name or "")
+
+    referred_by = None
+    if context.args:
+        payload = context.args[0]
+        if payload.isdigit() and int(payload) != user.id and get_user(int(payload)):
+            referred_by = int(payload)
+
+    upsert_user(user.id, user.username or "", user.full_name or "", referred_by=referred_by)
 
     if is_admin(user.id):
         await update.message.reply_text(
@@ -269,8 +357,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await update.message.reply_text(
-            "🆕 ثبت سفارش جدید — ارسال عکس برای سفارش طراحی سه‌بعدی\n"
-            "📋 سفارش‌های من — دیدن وضعیت سفارش‌های قبلی"
+            "📷 تبدیل عکس به 3D / 💎 طراحی طلا و جواهر / 🖨 پرینت سه‌بعدی / 🎨 طرح اختصاصی — ثبت سفارش در هر دسته\n"
+            "📋 پیگیری سفارشات — دیدن وضعیت سفارش‌های قبلی\n"
+            "💳 کیف پول — موجودی، شارژ، و لینک دعوت\n"
+            "👤 پروفایل من — دیدن و ویرایش اطلاعات حساب"
         )
 
 
@@ -279,8 +369,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def new_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_membership(update, context):
         return ConversationHandler.END
-    await update.message.reply_text("لطفاً عکس مورد نظر برای طراحی سه‌بعدی رو بفرستید 📷")
-    return ASK_PRINT  # منتظر عکس می‌مونیم، بعد سراغ سوال پرینت می‌ریم
+    order_type = update.message.text
+    context.user_data["order_type"] = order_type
+    await update.message.reply_text(f"سفارش «{order_type}» ثبت می‌شه.\nلطفاً عکس مورد نظر رو بفرستید 📷")
+    return ASK_PRINT
 
 
 async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -293,6 +385,14 @@ async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await file.download_to_drive(save_path)
 
     context.user_data["pending_photo_path"] = save_path
+
+    order_type = context.user_data.get("order_type", "")
+
+    if order_type == "🖨 پرینت سه‌بعدی":
+        # این دسته خودش یعنی پرینت میخواد، سوال اضافه لازم نیست
+        context.user_data["wants_print"] = True
+        await update.message.reply_text("لطفاً جزئیات پرینت رو بنویسید (سایز، جنس، تعداد و ...):")
+        return ASK_DETAILS
 
     await update.message.reply_text(
         "آیا علاوه بر طراحی سه‌بعدی، پرینت سه‌بعدیش رو هم می‌خواید انجام بدیم؟",
@@ -319,7 +419,8 @@ async def print_choice_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return ASK_DETAILS
     else:
         context.user_data["wants_print"] = False
-        order_id = finalize_order(user, photo_path, wants_print=False, details="")
+        order_type = context.user_data.get("order_type", "")
+        order_id = finalize_order(user, photo_path, wants_print=False, details="", order_type=order_type)
         await query.edit_message_text(f"✅ سفارش شما با شماره #{order_id} ثبت شد.")
         await notify_admins_new_order(context, order_id)
         context.user_data.clear()
@@ -334,18 +435,20 @@ async def print_details_received(update: Update, context: ContextTypes.DEFAULT_T
 
     details = update.message.text
     user = update.effective_user
-    order_id = finalize_order(user, photo_path, wants_print=True, details=details)
+    order_type = context.user_data.get("order_type", "")
+    wants_print = context.user_data.get("wants_print", True)
+    order_id = finalize_order(user, photo_path, wants_print=wants_print, details=details, order_type=order_type)
 
     await update.message.reply_text(
-        f"✅ سفارش شما با شماره #{order_id} (همراه با پرینت) ثبت شد.", reply_markup=CUSTOMER_MENU
+        f"✅ سفارش شما با شماره #{order_id} ثبت شد.", reply_markup=CUSTOMER_MENU
     )
     await notify_admins_new_order(context, order_id)
     context.user_data.clear()
     return ConversationHandler.END
 
 
-def finalize_order(user, photo_path, wants_print, details):
-    order_id = add_order(user.id, user.username or "", user.full_name or "", photo_path)
+def finalize_order(user, photo_path, wants_print, details, order_type=""):
+    order_id = add_order(user.id, user.username or "", user.full_name or "", photo_path, order_type=order_type)
     update_order(order_id, wants_print=1 if wants_print else 0, print_details=details)
     return order_id
 
@@ -355,6 +458,7 @@ async def notify_admins_new_order(context: ContextTypes.DEFAULT_TYPE, order_id: 
     print_text = "بله" if order["wants_print"] else "خیر"
     text = (
         f"📥 سفارش جدید #{order_id}\n"
+        f"نوع سفارش: {order['order_type'] or '-'}\n"
         f"کاربر: {order['full_name']} (@{order['username'] or '-'})\n"
         f"آیدی عددی: {order['user_id']}\n"
         f"پرینت سه‌بعدی: {print_text}\n"
@@ -406,8 +510,136 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["📋 سفارش‌های شما:\n"]
     for r in rows:
         price_text = f" — قیمت: {r['price']}" if r["price"] else ""
-        lines.append(f"#{r['id']} — {STATUS_LABELS.get(r['status'], r['status'])}{price_text}")
+        type_text = f" ({r['order_type']})" if r["order_type"] else ""
+        lines.append(f"#{r['id']}{type_text} — {STATUS_LABELS.get(r['status'], r['status'])}{price_text}")
     await update.message.reply_text("\n".join(lines))
+
+
+# ---------------------- پروفایل مشتری ----------------------
+
+async def my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_membership(update, context):
+        return
+    user = update.effective_user
+    u = get_user(user.id)
+    phone = u["phone"] if u and u["phone"] else "ثبت نشده"
+
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("📞 ثبت/تغییر شماره تماس", callback_data="edit_phone")]]
+    )
+    await update.message.reply_text(
+        f"👤 پروفایل شما:\n"
+        f"نام: {user.full_name}\n"
+        f"یوزرنیم: @{user.username or '-'}\n"
+        f"شماره تماس: {phone}\n"
+        f"تعداد سفارش‌ها: {count_orders_for_user(user.id)}",
+        reply_markup=keyboard,
+    )
+
+
+async def edit_phone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text("لطفاً شماره تماس خودتون رو بفرستید:")
+    return ASK_PHONE
+
+
+async def phone_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    phone = update.message.text.strip()
+    user = update.effective_user
+    set_phone(user.id, phone)
+    await update.message.reply_text("✅ شماره تماس شما ثبت شد.", reply_markup=CUSTOMER_MENU)
+    return ConversationHandler.END
+
+
+# ---------------------- کیف پول ----------------------
+
+async def wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_membership(update, context):
+        return
+    user = update.effective_user
+    u = get_user(user.id)
+    wallet = u["wallet"] if u else 0
+    invited_count = count_referrals(user.id)
+    invite_link = f"https://t.me/{BOT_USERNAME}?start={user.id}"
+
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("➕ شارژ کیف پول", callback_data="charge_wallet")]]
+    )
+    await update.message.reply_text(
+        f"💳 موجودی کیف پول شما: {wallet} تومان\n"
+        f"👥 تعداد افرادی که با لینک شما عضو شدن: {invited_count}\n\n"
+        f"لینک دعوت اختصاصی شما:\n{invite_link}",
+        reply_markup=keyboard,
+    )
+
+
+async def charge_wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text("چه مبلغی می‌خواید شارژ کنید؟ فقط عدد بفرستید (تومان):")
+    return ASK_CHARGE_AMOUNT
+
+
+async def charge_amount_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().replace(",", "")
+    if not text.isdigit():
+        await update.message.reply_text("لطفاً فقط عدد بفرستید (مثلاً 500000).")
+        return ASK_CHARGE_AMOUNT
+
+    amount = int(text)
+    user = update.effective_user
+
+    await update.message.reply_text(
+        f"مبلغ «{amount}» تومان رو به شماره کارت زیر واریز کنید:\n\n"
+        f"💳 {CARD_NUMBER}\n"
+        f"👤 به نام: {CARD_HOLDER}\n\n"
+        "بعد از واریز و تایید ادمین، مبلغ به کیف پولتون اضافه می‌شه.",
+        reply_markup=CUSTOMER_MENU,
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("✅ تایید شارژ", callback_data=f"confirm_charge:{user.id}:{amount}")]]
+    )
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    f"💳 درخواست شارژ کیف پول\n"
+                    f"کاربر: {user.full_name} (@{user.username or '-'})\n"
+                    f"آیدی: {user.id}\n"
+                    f"مبلغ درخواستی: {amount} تومان\n\n"
+                    "بعد از دیدن واریزی در حساب، تایید کنید:"
+                ),
+                reply_markup=keyboard,
+            )
+        except Exception:
+            pass
+
+    return ConversationHandler.END
+
+
+async def confirm_charge_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return
+    _, user_id, amount = query.data.split(":")
+    user_id = int(user_id)
+    amount = int(amount)
+
+    adjust_wallet(user_id, amount)
+    u = get_user(user_id)
+    await query.edit_message_text(f"✅ شارژ تایید شد. موجودی جدید کاربر {user_id}: {u['wallet']} تومان")
+
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"✅ شارژ کیف پول شما تایید شد.\nموجودی جدید: {u['wallet']} تومان",
+        )
+    except Exception:
+        pass
 
 
 # ---------------------- پنل ادمین ----------------------
@@ -428,6 +660,60 @@ async def admin_orders_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     await send_orders_list(update, status=None)
+
+
+async def admin_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    users = list_users()
+    if not users:
+        await update.message.reply_text("هنوز کاربری ثبت نشده.")
+        return
+
+    lines = ["👥 لیست کاربران:\n"]
+    for u in users:
+        order_count = count_orders_for_user(u["user_id"])
+        ref_count = count_referrals(u["user_id"])
+        lines.append(
+            f"👤 {u['full_name']} (@{u['username'] or '-'})\n"
+            f"   آیدی: {u['user_id']} | کیف پول: {u['wallet']} تومان\n"
+            f"   تعداد سفارش: {order_count} | دعوتی‌ها: {ref_count}\n"
+        )
+    lines.append("برای شارژ/کسر کیف‌پول: /addcredit <آیدی کاربر> <مبلغ>\n(مبلغ منفی برای کسر)")
+
+    # تلگرام محدودیت طول پیام داره، پس در صورت طولانی بودن تکه‌تکه می‌فرستیم
+    full_text = "\n".join(lines)
+    for i in range(0, len(full_text), 3500):
+        await update.message.reply_text(full_text[i:i + 3500])
+
+
+async def addcredit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("استفاده: /addcredit <آیدی کاربر> <مبلغ>")
+        return
+    try:
+        target_id = int(context.args[0])
+        amount = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("آیدی و مبلغ باید عدد باشن.")
+        return
+
+    if not get_user(target_id):
+        await update.message.reply_text("کاربری با این آیدی یافت نشد.")
+        return
+
+    adjust_wallet(target_id, amount)
+    u = get_user(target_id)
+    await update.message.reply_text(f"✅ انجام شد. موجودی جدید کاربر {target_id}: {u['wallet']} تومان")
+    try:
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=f"💳 کیف پول شما به‌روزرسانی شد. موجودی جدید: {u['wallet']} تومان",
+        )
+    except Exception:
+        pass
 
 
 async def send_orders_list(update: Update, status):
@@ -522,10 +808,23 @@ async def price_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     update_order(order_id, price=price_text, status="priced")
 
+    confirm_kb = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ تایید سفارش", callback_data=f"confirm_order:{order_id}"),
+                InlineKeyboardButton("❌ انصراف", callback_data=f"cancel_order:{order_id}"),
+            ]
+        ]
+    )
+
     try:
         await context.bot.send_message(
             chat_id=order["user_id"],
-            text=f"💰 قیمت سفارش #{order_id} شما: {price_text}\nبرای تایید و ادامه کار با ما در ارتباط باشید.",
+            text=(
+                f"💰 قیمت سفارش #{order_id} شما: {price_text}\n\n"
+                "در صورت تایید، شماره کارت برای واریز براتون ارسال می‌شه."
+            ),
+            reply_markup=confirm_kb,
         )
         await update.message.reply_text(f"✅ قیمت برای مشتری سفارش #{order_id} ارسال شد.", reply_markup=ADMIN_MENU)
     except Exception as e:
@@ -533,6 +832,80 @@ async def price_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.clear()
     return ConversationHandler.END
+
+
+async def confirm_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.split(":")[1])
+    order = get_order(order_id)
+    if not order:
+        return
+
+    update_order(order_id, status="confirmed")
+
+    await query.edit_message_text(
+        f"✅ سفارش #{order_id} شما تایید شد.\n\n"
+        f"لطفاً مبلغ «{order['price']}» رو به شماره کارت زیر واریز کنید:\n\n"
+        f"💳 {CARD_NUMBER}\n"
+        f"👤 به نام: {CARD_HOLDER}\n\n"
+        "بعد از واریز، رسیدشو همینجا برای ما بفرستید."
+    )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=f"✅ مشتری سفارش #{order_id} قیمت رو تایید کرد و منتظر واریزه.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("✅ تایید واریز (پرداخت انجام شد)", callback_data=f"confirm_payment:{order_id}")]]
+                ),
+            )
+        except Exception:
+            pass
+
+
+async def confirm_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return
+    order_id = int(query.data.split(":")[1])
+    order = get_order(order_id)
+    if not order:
+        return
+
+    update_order(order_id, status="in_progress")
+    await query.edit_message_text(f"✅ واریز سفارش #{order_id} تایید شد. سفارش در حال طراحیه.")
+
+    try:
+        await context.bot.send_message(
+            chat_id=order["user_id"],
+            text=f"✅ پرداخت سفارش #{order_id} شما تایید شد و کارتون در حال طراحیه 🎨",
+        )
+    except Exception:
+        pass
+
+
+async def cancel_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.split(":")[1])
+    order = get_order(order_id)
+    if not order:
+        return
+
+    update_order(order_id, status="cancelled_by_customer")
+    await query.edit_message_text(f"سفارش #{order_id} توسط شما لغو شد.")
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=f"❌ مشتری سفارش #{order_id} رو لغو کرد.",
+            )
+        except Exception:
+            pass
 
 
 # ---------------------- تحویل فایل نهایی ----------------------
@@ -589,7 +962,7 @@ def main():
 
     # مکالمه ثبت سفارش مشتری
     order_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^🆕 ثبت سفارش جدید$"), new_order_start)],
+        entry_points=[MessageHandler(filters.Regex("^(" + "|".join(CATEGORY_BUTTONS) + ")$"), new_order_start)],
         states={
             ASK_PRINT: [MessageHandler(filters.PHOTO, photo_received)],
             ASK_DETAILS: [
@@ -609,21 +982,49 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel_conversation)],
     )
 
+    # مکالمه ثبت شماره تماس پروفایل
+    profile_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(edit_phone_callback, pattern=r"^edit_phone$")],
+        states={
+            ASK_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, phone_received)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_conversation)],
+    )
+
+    # مکالمه شارژ کیف پول
+    charge_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(charge_wallet_callback, pattern=r"^charge_wallet$")],
+        states={
+            ASK_CHARGE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, charge_amount_received)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_conversation)],
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("deliver", deliver))
+    app.add_handler(CommandHandler("addcredit", addcredit_command))
     app.add_handler(CallbackQueryHandler(check_join_callback, pattern=r"^check_join$"))
     app.add_handler(CallbackQueryHandler(view_order_callback, pattern=r"^view:"))
     app.add_handler(CallbackQueryHandler(status_change_callback, pattern=r"^status:"))
+    app.add_handler(CallbackQueryHandler(confirm_order_callback, pattern=r"^confirm_order:"))
+    app.add_handler(CallbackQueryHandler(cancel_order_callback, pattern=r"^cancel_order:"))
+    app.add_handler(CallbackQueryHandler(confirm_payment_callback, pattern=r"^confirm_payment:"))
+    app.add_handler(CallbackQueryHandler(confirm_charge_callback, pattern=r"^confirm_charge:"))
 
     app.add_handler(order_conv)
     app.add_handler(price_conv)
+    app.add_handler(profile_conv)
+    app.add_handler(charge_conv)
 
-    app.add_handler(MessageHandler(filters.Regex("^📋 سفارش‌های من$"), my_orders))
+    app.add_handler(MessageHandler(filters.Regex("^📋 پیگیری سفارشات$"), my_orders))
+    app.add_handler(MessageHandler(filters.Regex("^💳 کیف پول$"), wallet_menu))
+    app.add_handler(MessageHandler(filters.Regex("^👤 پروفایل من$"), my_profile))
     app.add_handler(MessageHandler(filters.Regex("^ℹ️ راهنما$"), help_command))
     app.add_handler(MessageHandler(filters.Regex("^📥 سفارش‌های جدید$"), admin_orders_new))
     app.add_handler(MessageHandler(filters.Regex("^✅ سفارش‌های تکمیل‌شده$"), admin_orders_done))
     app.add_handler(MessageHandler(filters.Regex("^📋 همه سفارش‌ها$"), admin_orders_all))
+    app.add_handler(MessageHandler(filters.Regex("^👥 کاربران$"), admin_users_list))
 
     logger.info("ربات در حال اجراست...")
     app.run_polling()
