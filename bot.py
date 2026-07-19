@@ -389,6 +389,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------- فلوی ثبت سفارش (مشتری) ----------------------
 
 async def new_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"[DEBUG] new_order_start triggered, text={update.message.text!r}")
     if not await require_membership(update, context):
         return ConversationHandler.END
     order_type = normalize_label(update.message.text)
@@ -976,6 +977,15 @@ async def deliver(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ خطا در ارسال به مشتری: {e}")
 
 
+async def debug_log_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message and update.message.text:
+        logger.info(f"[DEBUG] پیام متنی دریافت شد: {update.message.text!r} از کاربر {update.effective_user.id}")
+
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("خطای پیش‌بینی‌نشده در پردازش آپدیت:", exc_info=context.error)
+
+
 # ---------------------- main ----------------------
 
 def main():
@@ -1047,6 +1057,10 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(btn_pattern("✅ سفارش‌های تکمیل‌شده")), admin_orders_done))
     app.add_handler(MessageHandler(filters.Regex(btn_pattern("📋 همه سفارش‌ها")), admin_orders_all))
     app.add_handler(MessageHandler(filters.Regex(btn_pattern("👥 کاربران")), admin_users_list))
+
+    # لاگ‌گیری برای دیباگ - همه پیام‌های متنی رو ثبت می‌کنه تا مشکل رو پیدا کنیم
+    app.add_handler(MessageHandler(filters.TEXT, debug_log_all_messages), group=1)
+    app.add_error_handler(global_error_handler)
 
     logger.info("ربات در حال اجراست...")
     app.run_polling()
