@@ -39,6 +39,7 @@ CHANNEL_USERNAME = "@AvineGroup0"  # کانال اجباری برای عضویت
 BOT_USERNAME = "my3ddesign_bot"  # بدون @ - برای ساخت لینک دعوت
 CARD_NUMBER = "6219861902402162"
 CARD_HOLDER = "امین احمدی"
+INSTAGRAM_URL = "https://www.instagram.com/avine_group0"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ORDERS_DIR = os.path.join(BASE_DIR, "orders")
@@ -68,14 +69,24 @@ ASK_PRICE = 10
 ASK_PHONE = 20
 # مرحله دریافت مبلغ شارژ کیف پول
 ASK_CHARGE_AMOUNT = 30
+# مراحل ارتباط با پشتیبانی
+ASK_SUPPORT_MSG = 40
+ASK_SUPPORT_REPLY = 50
 
-# دسته‌بندی خدمات - متن دکمه به عنوان نوع سفارش ذخیره می‌شه
+# دسته‌بندی خدمات که مستقیم عکس می‌گیرن (بدون زیرمنو)
 CATEGORY_BUTTONS = [
     "📷 تبدیل عکس به 3D",
-    "💎 طراحی طلا و جواهر",
-    "🖨 پرینت سه‌بعدی",
-    "🎨 طرح اختصاصی",
 ]
+
+# گزینه‌های زیرمنوی «خدمات طراحی و جواهر» و «خدمات پرینت سه‌بعدی»
+# کد کوتاه -> (متن نوع سفارش که ذخیره می‌شه)
+ORDER_TYPE_MAP = {
+    "jewelry_custom": "💎 خدمات طراحی و جواهر - طرح اختصاصی",
+    "print_wax": "🖨 خدمات پرینت سه‌بعدی - وکس",
+    "print_resin": "🖨 خدمات پرینت سه‌بعدی - رزین",
+}
+
+PRINT_SERVICE_PREFIX = "🖨 خدمات پرینت سه‌بعدی"
 
 
 def normalize_label(text: str) -> str:
@@ -102,12 +113,26 @@ def btn_pattern(label: str) -> str:
 
 CUSTOMER_MENU = ReplyKeyboardMarkup(
     [
-        ["📷 تبدیل عکس به 3D", "💎 طراحی طلا و جواهر"],
-        ["🖨 پرینت سه‌بعدی", "🎨 طرح اختصاصی"],
+        ["📷 تبدیل عکس به 3D", "💎 خدمات طراحی و جواهر"],
+        ["🖨 خدمات پرینت سه‌بعدی"],
         ["📋 پیگیری سفارشات", "💳 کیف پول"],
-        ["👤 پروفایل من", "ℹ️ راهنما"],
+        ["👤 پروفایل من", "💬 ارتباط با پشتیبانی"],
+        ["ℹ️ راهنما"],
     ],
     resize_keyboard=True,
+)
+
+JEWELRY_SUBMENU_KB = InlineKeyboardMarkup(
+    [[InlineKeyboardButton("🎨 طرح اختصاصی", callback_data="start_order:jewelry_custom")]]
+)
+
+PRINT_SUBMENU_KB = InlineKeyboardMarkup(
+    [
+        [
+            InlineKeyboardButton("🕯 وکس", callback_data="start_order:print_wax"),
+            InlineKeyboardButton("🧪 رزین", callback_data="start_order:print_resin"),
+        ]
+    ]
 )
 
 ADMIN_MENU = ReplyKeyboardMarkup(
@@ -123,8 +148,13 @@ PRINT_QUESTION_KB = InlineKeyboardMarkup(
         [
             InlineKeyboardButton("بله، پرینت هم می‌خوام", callback_data="print:yes"),
             InlineKeyboardButton("نه، فقط طراحی", callback_data="print:no"),
-        ]
+        ],
+        [InlineKeyboardButton("❌ لغو سفارش", callback_data="cancel_new_order")],
     ]
+)
+
+CANCEL_ORDER_KB = InlineKeyboardMarkup(
+    [[InlineKeyboardButton("❌ لغو سفارش", callback_data="cancel_new_order")]]
 )
 
 # ---------------------- دیتابیس ----------------------
@@ -140,6 +170,7 @@ def init_db():
             phone TEXT,
             wallet INTEGER DEFAULT 0,
             referred_by INTEGER,
+            instagram_followed INTEGER DEFAULT 0,
             joined_at TEXT
         )
     """)
@@ -353,6 +384,95 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=CUSTOMER_MENU,
     )
 
+    u = get_user(user.id)
+    if u and not u["instagram_followed"]:
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("📸 اینستاگرام ما", url=INSTAGRAM_URL)],
+                [InlineKeyboardButton("✅ فالو کردم", callback_data="instagram_followed")],
+            ]
+        )
+        await update.message.reply_text(
+            "برای دیدن نمونه‌کارها و اخبار جدید، اینستاگرام ما رو هم فالو کنید:",
+            reply_markup=keyboard,
+        )
+
+
+async def instagram_followed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("ممنون از همراهیتون! 🙏")
+    user = query.from_user
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET instagram_followed = 1 WHERE user_id = ?", (user.id,))
+    conn.commit()
+    conn.close()
+    await query.edit_message_text("ممنون که همراه ما هستید! 🙏📸")
+
+
+# ---------------------- ارتباط مستقیم با پشتیبانی ----------------------
+
+async def support_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_membership(update, context):
+        return ConversationHandler.END
+    await update.message.reply_text(
+        "پیام خودتون رو بنویسید، مستقیم برای پشتیبانی ارسال می‌شه. برای انصراف /cancel رو بزنید:"
+    )
+    return ASK_SUPPORT_MSG
+
+
+async def support_message_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = update.message.text
+
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("↩️ پاسخ", callback_data=f"reply_support:{user.id}")]]
+    )
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    f"💬 پیام پشتیبانی جدید\n"
+                    f"از: {user.full_name} (@{user.username or '-'})\n"
+                    f"آیدی: {user.id}\n\n"
+                    f"«{text}»"
+                ),
+                reply_markup=keyboard,
+            )
+        except Exception:
+            pass
+
+    await update.message.reply_text("✅ پیام شما ارسال شد. به‌زودی پاسخ داده می‌شه.", reply_markup=CUSTOMER_MENU)
+    return ConversationHandler.END
+
+
+async def reply_support_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        return
+    target_id = int(query.data.split(":")[1])
+    context.user_data["support_reply_to"] = target_id
+    await query.message.reply_text(f"پاسخ خودتون به کاربر {target_id} رو بنویسید:")
+    return ASK_SUPPORT_REPLY
+
+
+async def support_reply_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_id = context.user_data.get("support_reply_to")
+    if not target_id:
+        return ConversationHandler.END
+
+    text = update.message.text
+    try:
+        await context.bot.send_message(chat_id=target_id, text=f"💬 پاسخ پشتیبانی:\n{text}")
+        await update.message.reply_text("✅ پاسخ برای کاربر ارسال شد.", reply_markup=ADMIN_MENU)
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا در ارسال پاسخ: {e}")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
 
 async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -379,14 +499,29 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await update.message.reply_text(
-            "📷 تبدیل عکس به 3D / 💎 طراحی طلا و جواهر / 🖨 پرینت سه‌بعدی / 🎨 طرح اختصاصی — ثبت سفارش در هر دسته\n"
+            "📷 تبدیل عکس به 3D — ثبت سفارش مستقیم\n"
+            "💎 خدمات طراحی و جواهر — انتخاب نوع خدمت (مثلاً طرح اختصاصی)\n"
+            "🖨 خدمات پرینت سه‌بعدی — انتخاب جنس (وکس یا رزین)\n"
             "📋 پیگیری سفارشات — دیدن وضعیت سفارش‌های قبلی\n"
             "💳 کیف پول — موجودی، شارژ، و لینک دعوت\n"
-            "👤 پروفایل من — دیدن و ویرایش اطلاعات حساب"
+            "👤 پروفایل من — دیدن و ویرایش اطلاعات حساب\n"
+            "💬 ارتباط با پشتیبانی — پیام مستقیم به تیم پشتیبانی"
         )
 
 
 # ---------------------- فلوی ثبت سفارش (مشتری) ----------------------
+
+async def jewelry_menu_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_membership(update, context):
+        return
+    await update.message.reply_text("کدوم خدمت رو می‌خواید؟", reply_markup=JEWELRY_SUBMENU_KB)
+
+
+async def print_menu_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_membership(update, context):
+        return
+    await update.message.reply_text("جنس پرینت رو انتخاب کنید:", reply_markup=PRINT_SUBMENU_KB)
+
 
 async def new_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"[DEBUG] new_order_start triggered, text={update.message.text!r}")
@@ -394,7 +529,22 @@ async def new_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     order_type = normalize_label(update.message.text)
     context.user_data["order_type"] = order_type
-    await update.message.reply_text(f"سفارش «{order_type}» ثبت می‌شه.\nلطفاً عکس مورد نظر رو بفرستید 📷")
+    await update.message.reply_text(
+        f"سفارش «{order_type}» ثبت می‌شه.\nلطفاً عکس مورد نظر رو بفرستید 📷",
+        reply_markup=CANCEL_ORDER_KB,
+    )
+    return ASK_PRINT
+
+
+async def start_order_from_submenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not await require_membership(update, context):
+        return ConversationHandler.END
+    code = query.data.split(":", 1)[1]
+    order_type = ORDER_TYPE_MAP.get(code, code)
+    context.user_data["order_type"] = order_type
+    await query.edit_message_text(f"سفارش «{order_type}» ثبت می‌شه.\nلطفاً عکس مورد نظر رو بفرستید 📷")
     return ASK_PRINT
 
 
@@ -411,10 +561,13 @@ async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     order_type = context.user_data.get("order_type", "")
 
-    if normalize_label(order_type) == normalize_label("🖨 پرینت سه‌بعدی"):
+    if normalize_label(order_type).startswith(normalize_label(PRINT_SERVICE_PREFIX)):
         # این دسته خودش یعنی پرینت میخواد، سوال اضافه لازم نیست
         context.user_data["wants_print"] = True
-        await update.message.reply_text("لطفاً جزئیات پرینت رو بنویسید (سایز، جنس، تعداد و ...):")
+        await update.message.reply_text(
+            "لطفاً جزئیات پرینت رو بنویسید (سایز، تعداد و ...):",
+            reply_markup=CANCEL_ORDER_KB,
+        )
         return ASK_DETAILS
 
     await update.message.reply_text(
@@ -438,7 +591,7 @@ async def print_choice_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     if choice == "yes":
         context.user_data["wants_print"] = True
-        await query.edit_message_text("لطفاً جزئیات پرینت رو بنویسید (سایز، جنس، تعداد و ...):")
+        await query.edit_message_text("لطفاً جزئیات پرینت رو بنویسید (سایز، جنس، تعداد و ...):", reply_markup=CANCEL_ORDER_KB)
         return ASK_DETAILS
     else:
         context.user_data["wants_print"] = False
@@ -510,6 +663,17 @@ async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = update.effective_user
     menu = ADMIN_MENU if is_admin(user.id) else CUSTOMER_MENU
     await update.message.reply_text("لغو شد.", reply_markup=menu)
+    return ConversationHandler.END
+
+
+async def cancel_new_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.clear()
+    user = query.from_user
+    menu = ADMIN_MENU if is_admin(user.id) else CUSTOMER_MENU
+    await query.edit_message_text("❌ سفارش لغو شد.")
+    await context.bot.send_message(chat_id=user.id, text="از منوی پایین می‌تونید دوباره شروع کنید:", reply_markup=menu)
     return ConversationHandler.END
 
 
@@ -994,7 +1158,10 @@ def main():
 
     # مکالمه ثبت سفارش مشتری
     order_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex(CATEGORY_PATTERN), new_order_start)],
+        entry_points=[
+            MessageHandler(filters.Regex(CATEGORY_PATTERN), new_order_start),
+            CallbackQueryHandler(start_order_from_submenu, pattern=r"^start_order:"),
+        ],
         states={
             ASK_PRINT: [MessageHandler(filters.PHOTO, photo_received)],
             ASK_DETAILS: [
@@ -1002,7 +1169,10 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, print_details_received),
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel_conversation)],
+        fallbacks=[
+            CommandHandler("cancel", cancel_conversation),
+            CallbackQueryHandler(cancel_new_order_callback, pattern=r"^cancel_new_order$"),
+        ],
     )
 
     # مکالمه تعیین قیمت (ادمین)
@@ -1032,6 +1202,24 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel_conversation)],
     )
 
+    # مکالمه ارتباط با پشتیبانی (مشتری)
+    support_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(btn_pattern("💬 ارتباط با پشتیبانی")), support_start)],
+        states={
+            ASK_SUPPORT_MSG: [MessageHandler(filters.TEXT & ~filters.COMMAND, support_message_received)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_conversation)],
+    )
+
+    # مکالمه پاسخ ادمین به پشتیبانی
+    support_reply_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(reply_support_callback, pattern=r"^reply_support:")],
+        states={
+            ASK_SUPPORT_REPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, support_reply_received)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_conversation)],
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("deliver", deliver))
@@ -1043,12 +1231,17 @@ def main():
     app.add_handler(CallbackQueryHandler(cancel_order_callback, pattern=r"^cancel_order:"))
     app.add_handler(CallbackQueryHandler(confirm_payment_callback, pattern=r"^confirm_payment:"))
     app.add_handler(CallbackQueryHandler(confirm_charge_callback, pattern=r"^confirm_charge:"))
+    app.add_handler(CallbackQueryHandler(instagram_followed_callback, pattern=r"^instagram_followed$"))
 
     app.add_handler(order_conv)
     app.add_handler(price_conv)
     app.add_handler(profile_conv)
     app.add_handler(charge_conv)
+    app.add_handler(support_conv)
+    app.add_handler(support_reply_conv)
 
+    app.add_handler(MessageHandler(filters.Regex(btn_pattern("💎 خدمات طراحی و جواهر")), jewelry_menu_start))
+    app.add_handler(MessageHandler(filters.Regex(btn_pattern("🖨 خدمات پرینت سه‌بعدی")), print_menu_start))
     app.add_handler(MessageHandler(filters.Regex(btn_pattern("📋 پیگیری سفارشات")), my_orders))
     app.add_handler(MessageHandler(filters.Regex(btn_pattern("💳 کیف پول")), wallet_menu))
     app.add_handler(MessageHandler(filters.Regex(btn_pattern("👤 پروفایل من")), my_profile))
