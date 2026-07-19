@@ -11,6 +11,7 @@
 """
 
 import os
+import re
 import sqlite3
 import logging
 from datetime import datetime
@@ -85,12 +86,17 @@ def normalize_label(text: str) -> str:
     return text.replace("\ufe0f", "").strip()
 
 
-class CategoryFilter(filters.MessageFilter):
-    def filter(self, message):
-        return normalize_label(message.text) in [normalize_label(b) for b in CATEGORY_BUTTONS]
+def _flexible_pattern(label: str) -> str:
+    """رجکس‌ی می‌سازه که حتی اگه گوشی کاربر بین کاراکترها variation selector
+    اضافه کرده باشه (مشکل رایج نمایش ایموجی)، باز هم دکمه رو تشخیص بده."""
+    return "".join(re.escape(ch) + r"\ufe0f?" for ch in label)
 
 
-category_filter = CategoryFilter()
+CATEGORY_PATTERN = "^(" + "|".join(_flexible_pattern(b) for b in CATEGORY_BUTTONS) + ")$"
+
+
+def btn_pattern(label: str) -> str:
+    return "^" + _flexible_pattern(label) + "$"
 
 # ---------------------- کیبوردها ----------------------
 
@@ -978,7 +984,7 @@ def main():
 
     # مکالمه ثبت سفارش مشتری
     order_conv = ConversationHandler(
-        entry_points=[MessageHandler(category_filter, new_order_start)],
+        entry_points=[MessageHandler(filters.Regex(CATEGORY_PATTERN), new_order_start)],
         states={
             ASK_PRINT: [MessageHandler(filters.PHOTO, photo_received)],
             ASK_DETAILS: [
@@ -1033,14 +1039,14 @@ def main():
     app.add_handler(profile_conv)
     app.add_handler(charge_conv)
 
-    app.add_handler(MessageHandler(filters.Regex("^📋 پیگیری سفارشات$"), my_orders))
-    app.add_handler(MessageHandler(filters.Regex("^💳 کیف پول$"), wallet_menu))
-    app.add_handler(MessageHandler(filters.Regex("^👤 پروفایل من$"), my_profile))
-    app.add_handler(MessageHandler(filters.Regex("^ℹ️ راهنما$"), help_command))
-    app.add_handler(MessageHandler(filters.Regex("^📥 سفارش‌های جدید$"), admin_orders_new))
-    app.add_handler(MessageHandler(filters.Regex("^✅ سفارش‌های تکمیل‌شده$"), admin_orders_done))
-    app.add_handler(MessageHandler(filters.Regex("^📋 همه سفارش‌ها$"), admin_orders_all))
-    app.add_handler(MessageHandler(filters.Regex("^👥 کاربران$"), admin_users_list))
+    app.add_handler(MessageHandler(filters.Regex(btn_pattern("📋 پیگیری سفارشات")), my_orders))
+    app.add_handler(MessageHandler(filters.Regex(btn_pattern("💳 کیف پول")), wallet_menu))
+    app.add_handler(MessageHandler(filters.Regex(btn_pattern("👤 پروفایل من")), my_profile))
+    app.add_handler(MessageHandler(filters.Regex(btn_pattern("ℹ️ راهنما")), help_command))
+    app.add_handler(MessageHandler(filters.Regex(btn_pattern("📥 سفارش‌های جدید")), admin_orders_new))
+    app.add_handler(MessageHandler(filters.Regex(btn_pattern("✅ سفارش‌های تکمیل‌شده")), admin_orders_done))
+    app.add_handler(MessageHandler(filters.Regex(btn_pattern("📋 همه سفارش‌ها")), admin_orders_all))
+    app.add_handler(MessageHandler(filters.Regex(btn_pattern("👥 کاربران")), admin_users_list))
 
     logger.info("ربات در حال اجراست...")
     app.run_polling()
